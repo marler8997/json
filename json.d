@@ -1,7 +1,15 @@
 /* TODO
 --------------------------------------------------------------------------------
-* Implement numbers
+* !!!! Handle overflows for long doubles when converting string to number in Json constructor
+* Check trailing comma for lenient and strict
+* Implement non-ascii chars
+* Implement error messages with line/col numbers and filenames
+   - Already setup to do this, the linenumber is kept track of and the column
+     number can be calculated by subtracting the next pointer from lineStart
+* Implement UTF16 & UTF32
 * Implement comments
+* Support single-quoted strings?
+   Add an argument to the scanQuotedString that says what the end character is
 * TLS data is slower then global (on some platform/compilers)
   Maybe make data __gshared when single-threaded flag is set?
 * What to do about memory?
@@ -10,21 +18,24 @@
      the seconds I can perform the parse (make this a compile option for now)
 * Think about making JsonParser.parse re-entrant.
   Some of the functions will need to rewind their state
-
+* Note: std.json crashes when an exponent exceeds what a double can represent
+        this parser handles those numbers by storing the number as a string
 */
 module json;
 
 // Compile Options
 alias LineNumber = uint;
 version = SingleThreaded;
+//version = PrintTestInfo;
 
 import std.stdio  : write, writeln, writefln, stdout;
 import std.string : format;
+import std.bigint;
 
 //
-// The JSON Specification is defined in RFC4627
+// The JSON Specification is defined in RFC4627 and RFC7159
 //
-enum JsonType : ubyte { bool_, number, string_, array, object}
+enum JsonType : ubyte { bool_ = 0, number = 1, string_ = 2, array = 3, object = 4}
 
 //
 // Lenient JSON
@@ -44,7 +55,6 @@ class JsonException : Exception
     controlChar, // Encountered non-whitespace control char (ascii=0x00-0x1F)
     endedInsideStructure, // The JSON ended inside an object or an array
     unexpectedChar, // Encountered a char unexpectedly
-    unexpectedCloseBrace, // Encountered a close brace but not inside an object
     tabNewlineCRInsideQuotes,
     controlCharInsideQuotes,
     invalidEscapeChar,
@@ -138,100 +148,56 @@ Note that you can tell the encoding of a json file by looking at the first 2 cha
  xx xx        UTF-8
 
 */
-
-struct JsonOptions
-{
-  ubyte flags;
-
-  @property bool lenient() pure nothrow @safe @nogc const { return (flags & 0x01) != 0;}
-  @property void lenient(bool v) pure nothrow @safe @nogc { if (v) flags |= 0x01;else flags &= ~0x01;}
-}
-
-/*
-Character Sets
-
-Chars          | ID           | Description
-------------------------------------------------------------
-' ' '\t' '\r'  | ws           | Whitespace
-'\n'           |
-------------------------------------------------------------
-0x00-0x1F minus| cc           | ControlCharacter
-Whitespace     |              | Always an error!
-------------------------------------------------------------
-'{'            | '{'          | StartObject
-------------------------------------------------------------
-'}'            | '}'          | EndObject
-------------------------------------------------------------
-'['            | '['          | StartArray
-------------------------------------------------------------
-']'            | ']'          | EndArray
-------------------------------------------------------------
-':'            | ':'          | NameSeparator
-------------------------------------------------------------
-','            | ','          | ValueSeparator
-------------------------------------------------------------
-'/'            | '/'          | Slash (comment start)
-------------------------------------------------------------
-'#'            | '#'          | EndOfLineComment
-------------------------------------------------------------
-'"'            | '"'          | Quote
-------------------------------------------------------------
-ELSE '!' '$'   | othe         | Everything else
-'%' '&' ''' '('|              |
-')' '*' '+' '-'|              |
-'.' or Unicode |              |
-------------------------------------------------------------
-*/
 enum JsonCharSet : ubyte {
-  other          = 0,
-  notAscii       = 1,
-  spaceTabCR     = 2,
-  newline        = 3,
-  startObject    = 4,
-  endObject      = 5,
-  startArray     = 6,
-  endArray       = 7,
-  nameSeparator  = 8,
-  valueSeparator = 9,
-  slash          = 10,
-  hash           = 11,
-  quote          = 12,
-  cc             = 13,
+  other          =  0, // (default) Any ascii character that is not in another set 
+  notAscii       =  1, // Any character larger then 127
+  spaceTabCR     =  2, // ' ', '\t' or '\r'
+  newline        =  3, // '\n'
+  startObject    =  4, // '{'
+  endObject      =  5, // '}'
+  startArray     =  6, // '['
+  endArray       =  7, // ']'
+  nameSeparator  =  8, // ':'
+  valueSeparator =  9, // ','
+  slash          = 10, // '/' (Used for comments)
+  hash           = 11, // '#' (Used for comments)
+  quote          = 12, // '"'
+  asciiControl   = 13, // Any character less then 0x20 (an ascii control character)
 }
 enum JsonCharSetLookupLength = 128;
 __gshared immutable JsonCharSet[JsonCharSetLookupLength] jsonCharSetMap =
   [
-   '\0'   : JsonCharSet.cc,
-   '\x01' : JsonCharSet.cc,
-   '\x02' : JsonCharSet.cc,
-   '\x03' : JsonCharSet.cc,
-   '\x04' : JsonCharSet.cc,
-   '\x05' : JsonCharSet.cc,
-   '\x06' : JsonCharSet.cc,
-   '\x07' : JsonCharSet.cc,
-   '\x08' : JsonCharSet.cc,
+   '\0'   : JsonCharSet.asciiControl,
+   '\x01' : JsonCharSet.asciiControl,
+   '\x02' : JsonCharSet.asciiControl,
+   '\x03' : JsonCharSet.asciiControl,
+   '\x04' : JsonCharSet.asciiControl,
+   '\x05' : JsonCharSet.asciiControl,
+   '\x06' : JsonCharSet.asciiControl,
+   '\x07' : JsonCharSet.asciiControl,
+   '\x08' : JsonCharSet.asciiControl,
 
-   '\x0B' : JsonCharSet.cc,
-   '\x0C' : JsonCharSet.cc,
+   '\x0B' : JsonCharSet.asciiControl,
+   '\x0C' : JsonCharSet.asciiControl,
 
-   '\x0E' : JsonCharSet.cc,
-   '\x0F' : JsonCharSet.cc,
-   '\x10' : JsonCharSet.cc,
-   '\x11' : JsonCharSet.cc,
-   '\x12' : JsonCharSet.cc,
-   '\x13' : JsonCharSet.cc,
-   '\x14' : JsonCharSet.cc,
-   '\x15' : JsonCharSet.cc,
-   '\x16' : JsonCharSet.cc,
-   '\x17' : JsonCharSet.cc,
-   '\x18' : JsonCharSet.cc,
-   '\x19' : JsonCharSet.cc,
-   '\x1A' : JsonCharSet.cc,
-   '\x1B' : JsonCharSet.cc,
-   '\x1C' : JsonCharSet.cc,
-   '\x1D' : JsonCharSet.cc,
-   '\x1E' : JsonCharSet.cc,
-   '\x1F' : JsonCharSet.cc,
+   '\x0E' : JsonCharSet.asciiControl,
+   '\x0F' : JsonCharSet.asciiControl,
+   '\x10' : JsonCharSet.asciiControl,
+   '\x11' : JsonCharSet.asciiControl,
+   '\x12' : JsonCharSet.asciiControl,
+   '\x13' : JsonCharSet.asciiControl,
+   '\x14' : JsonCharSet.asciiControl,
+   '\x15' : JsonCharSet.asciiControl,
+   '\x16' : JsonCharSet.asciiControl,
+   '\x17' : JsonCharSet.asciiControl,
+   '\x18' : JsonCharSet.asciiControl,
+   '\x19' : JsonCharSet.asciiControl,
+   '\x1A' : JsonCharSet.asciiControl,
+   '\x1B' : JsonCharSet.asciiControl,
+   '\x1C' : JsonCharSet.asciiControl,
+   '\x1D' : JsonCharSet.asciiControl,
+   '\x1E' : JsonCharSet.asciiControl,
+   '\x1F' : JsonCharSet.asciiControl,
 
    '\t'   : JsonCharSet.spaceTabCR,
    '\n'   : JsonCharSet.newline,
@@ -263,14 +229,11 @@ __gshared immutable JsonCharSet[JsonCharSetLookupLength] jsonCharSetMap =
 struct Json
 {
   //@safe:
-  import std.bigint;
-
-  enum NumberType : ubyte { long_, ulong_, double_, bigInt }
+  enum NumberType : ubyte { long_ = 0, double_ = 1, bigInt = 2, string_ = 3 }
 
   union Payload {
     bool bool_;
     long long_;
-    ulong ulong_;
     double double_;
     BigInt bigInt;
     string string_;
@@ -293,30 +256,30 @@ struct Json
     this.payload.bool_ = value;
   }
   this(int value) {
-    this.info = NumberType.long_ << 3 & JsonType.number;
+    this.info = NumberType.long_ << 3 | JsonType.number;
     this.payload.long_ = value;
   }
   this(uint value) {
-    this.info = NumberType.ulong_ << 3 & JsonType.number;
-    this.payload.ulong_ = value;
+    this.info = NumberType.long_ << 3 | JsonType.number;
+    this.payload.long_ = value;
   }
   /// ditto
   this(long value) {
-    this.info = NumberType.long_ << 3 & JsonType.number;
+    this.info = NumberType.long_ << 3 | JsonType.number;
     this.payload.long_ = value;
   }
   this(ulong value) {
-    this.info = NumberType.ulong_ << 3 & JsonType.number;
-    this.payload.ulong_ = value;
+    this.info = NumberType.bigInt << 3 | JsonType.number;
+    this.payload.bigInt = value;
   }
   /// ditto
   this(double value) {
-    this.info = NumberType.double_ << 3 & JsonType.number;
+    this.info = NumberType.double_ << 3 | JsonType.number;
     this.payload.double_ = value;
   }
   /// ditto
   this(BigInt value) {
-    this.info = NumberType.bigInt << 3 & JsonType.number;
+    this.info = NumberType.bigInt << 3 | JsonType.number;
     this.payload.bigInt = value;
   }
   /// ditto
@@ -335,6 +298,85 @@ struct Json
     this.payload.object = value;
   }
 
+  static immutable maxNegativeLongString  =  "-9223372036854775808";
+  static immutable maxLongString          =   "9223372036854775807";
+  //static immutable maxUlongString = "18446744073709551615";
+  this(const(char[]) numberString, size_t intPartLength)
+  {
+    import std.conv : to, ConvException;
+    if(intPartLength == numberString.length) {
+      if(numberString[0] == '-') {
+	if(numberString.length <  maxNegativeLongString.length ||
+	   (numberString.length == maxNegativeLongString.length && numberString <= maxNegativeLongString)) {
+	  this(to!long(numberString));
+	  return;
+	}
+      } else {
+	if(numberString.length <  maxLongString.length ||
+	   (numberString.length == maxLongString.length && numberString <= maxLongString)) {
+	  this(to!long(numberString));
+	  return;
+	}
+      }
+      this(BigInt(numberString));
+    } else {
+      try {
+	// TODO: how to handle double overflow?
+	this(to!double(numberString));
+      } catch(ConvException) {
+	setupAsHugeNumber(cast(string)numberString);
+      }
+    }
+  }
+  unittest
+  {
+    assert(Json( 0  ).equals(Json( "0", 1)));
+    assert(Json( 0  ).equals(Json("-0", 2)));
+    assert(Json( 0.0).equals(Json("0.0", 1/*, 2*/)));
+
+    assert(Json( 1  ).equals(Json( "1", 1)));
+    assert(Json(-1  ).equals(Json("-1", 2)));
+    assert(Json( 1.0).equals(Json("1.0", 1/*, 2*/)));
+
+    assert(Json( 9  ).equals(Json( "9", 1)));
+    assert(Json(-9  ).equals(Json("-9", 2)));
+    assert(Json( 9.0).equals(Json("9.0", 1/*, 2*/)));
+
+    assert(Json(ulong.max  ) .equals(Json("18446744073709551615", 20)));
+    assert(Json(ulong.max-1) .equals(Json("18446744073709551614", 20)));
+
+    assert(Json(long.max)    .equals(Json("9223372036854775807" , 19)));
+    assert(Json(long.min)    .equals(Json("-9223372036854775808", 20)));
+    assert(Json(long.min + 1).equals(Json("-9223372036854775807", 20)));
+  
+    assert(Json( BigInt("123456789012345678901234567890"))            .equals(Json("123456789012345678901234567890", 30)));
+    assert(Json( BigInt("999999999999999999999999223372036854775807")).equals(Json("999999999999999999999999223372036854775807", 42)));
+
+    assert(Json( 0.0).equals(Json( "0e0"    , 1)));
+    assert(Json(10.0).equals(Json( "1e1"    , 1)));
+    assert(Json(123.4).equals(Json("1.234e2", 1)));
+    assert(Json(123.4).equals(Json("1.234E2", 1)));
+    assert(Json(.01234).equals(Json("1.234e-2", 1)));
+    assert(Json(.01234).equals(Json("1.234E-2", 1)));
+  }
+
+  private this (ubyte info, Payload payload) {
+    this.info = info;
+    this.payload = payload;
+  }
+  static Json hugeNumber(string number)
+  {
+    //return Json(cast(ubyte)(Json.NumberType.string_ << 3 | JsonType.number), Payload(cast(string)number));
+    Json json;
+    json.setupAsHugeNumber(number);
+    return json;
+  }
+  void setupAsHugeNumber(string number)
+  {
+    info = Json.NumberType.string_ << 3 | JsonType.number;
+    payload.string_ = cast(string)number;
+  }
+  
   bool isObject()
   {
     return this.info == JsonType.object;
@@ -355,14 +397,22 @@ struct Json
   {
     return this.info == JsonType.string_;
   }
+  bool opEquals(ref Json other)
+  {
+    throw new Exception("Do not compare Json values using '==', instead, use value.equals(otherValue)");
+  }
   bool equals(Json other)
   {
     final switch(info & 0b111) {
     case JsonType.bool_:
       return other.info == JsonType.bool_ && this.payload.bool_ == other.payload.bool_;
     case JsonType.number:
-      //return other.info == JsonType.number_ && this.payload.bool_ == other.payload.bool_;
-      throw new Exception("equals(number) not implemented");
+      final switch((info >> 3) & 0b111) {
+      case NumberType.long_  : return this.info == other.info && this.payload.long_   == other.payload.long_;
+      case NumberType.double_: return this.info == other.info && this.payload.double_ == other.payload.double_;
+      case NumberType.bigInt : return this.info == other.info && this.payload.bigInt  == other.payload.bigInt;
+      case NumberType.string_: return this.info == other.info && this.payload.string_ == other.payload.string_;
+      }
     case JsonType.string_:
       return other.info == JsonType.string_ && this.payload.string_ == other.payload.string_;
     case JsonType.array:
@@ -394,16 +444,42 @@ struct Json
   void add(string key, Json value) {
     payload.object[key] = value;
   }
+  @property string typeString()
+  {
+    import std.conv : to;
+    if((info & 0b111) == JsonType.number) {
+      final switch((info >> 3) & 0b111) {
+      case NumberType.long_  : return "number:long";
+      case NumberType.double_: return "number:double";
+      case NumberType.bigInt : return "number:bigint";
+      case NumberType.string_: return "number:string";
+      }
+    }
+    return to!string(cast(JsonType)(info & 0b111));
+  }
   void toString(scope void delegate(const(char)[]) sink) const
   {
+    import std.conv : to;
+    
     final switch(info & 0b111) {
     case JsonType.bool_:
       sink(payload.bool_ ? "true" : "false");
       return;
     case JsonType.number:
-      //return other.info == JsonType.number_ && this.payload.bool_ == other.payload.bool_;
-      throw new Exception("toString(number) not implemented");
-      return;
+      final switch((info >> 3) & 0b111) {
+      case NumberType.long_:
+	sink(payload.long_.to!string());
+	return;
+      case NumberType.double_:
+	sink(payload.double_.to!string());
+	return;
+      case NumberType.bigInt:
+	sink(payload.bigInt.to!string());
+	return;
+      case NumberType.string_:
+	sink(payload.string_);
+	return;
+      }
     case JsonType.string_:
       if(payload.string_ is null) {
 	sink("null");
@@ -438,8 +514,9 @@ struct Json
 	bool atFirst = true;
 	foreach(key, value; payload.object) {
 	  if(atFirst) {atFirst = false;} else {sink(",");}
+	  sink("\"");
 	  sink(key);
-	  sink(",");
+	  sink("\":");
 	  value.toString(sink);
 	}
 	sink("}");
@@ -473,6 +550,55 @@ unittest
 +/
 }
 
+/+
+number = [ '-' ] int [ frac ] [ exp ]
+
+digit1-9 = '1' - '9'
+digit    = '0' - '9'
+int = '0' | digit1-9 digit*
+
+frac = '.' DIGIT+
+exp  = 'e' ( '-' | '+' )? DIGIT+
+
+
+<number>
+    '-'     = goto <int1>
+    '0'     = goto <frac_exp_or_done>
+    '1'-'9' = goto <int2>
+
+<int1>
+    '0'     = goto <frac_exp_or_done>
+    '1'-'9' = goto <int2>
+
+<int2>
+    '0'-'9' = stay
+    '.'     = goto <frac>
+    'e' 'E' = goto <exp1>
+
+<frac_exp_or_done>
+    '.'     = goto <frac>
+    'e' 'E' = goto <exp1>
+
+<frac>
+    '0'-'9' = stay
+    'e' 'E' = goto <exp1>
+
+<exp1>
+    '-'     = goto <exp2>
+    '+'     = goto <exp2>
+    '0'-'9' = goto <exp2>
+
+<exp2>
+    '0'-'9' = stay
++/
+
+struct JsonOptions
+{
+  ubyte flags;
+
+  @property bool lenient() pure nothrow @safe @nogc const { return (flags & 0x01) != 0;}
+  @property void lenient(bool v) pure nothrow @safe @nogc { if (v) flags |= 0x01;else flags &= ~0x01;}
+}
 struct JsonParser
 {
   alias func = void function();
@@ -490,17 +616,81 @@ static:
   char* lastLineStart;
   LineNumber lineNumber;
 
-  struct JsonListNode
+  abstract class JsonListNode
   {
     Json json;
-    JsonListNode* previous;
-    this(JsonListNode* previous) {
+    JsonListNode previous;
+    abstract void setKey(string key);
+    abstract void addValue(Json value);
+    abstract void setCommaContext();
+  }
+  class JsonObjectNode : JsonListNode
+  {
+    string currentKey;
+    this(JsonListNode previous)
+    {
+      this.json.setupAsObject();
       this.previous = previous;
     }
+    final override void setKey(string key)
+    {
+      assert(currentKey is null);
+      this.currentKey = key;
+    }
+    final override void addValue(Json value)
+    {
+      assert(currentKey !is null);
+      json.add(currentKey, value);
+      this.currentKey = null;
+    }
+    final override void setCommaContext()
+    {
+      setObjectCommaContext();
+    }
   }
-  JsonListNode* currentRoot;
-  JsonListNode* currentContainer;
-  string currentKey;
+  class JsonArrayNode : JsonListNode
+  {
+    this(JsonListNode previous)
+    {
+      json.setupAsArray();
+      this.previous = previous;
+    }
+    final override void setKey(string key)
+    {
+      assert(0, "cannot call setKey on an array");
+    }
+    final override void addValue(Json value)
+    {
+      json.arrayAppend(value);
+    }
+    final override void setCommaContext()
+    {
+      setArrayCommaContext();
+    }
+  }
+  class JsonValueNode : JsonListNode
+  {
+    this(Json json, JsonListNode previous)
+    {
+      this.json = json;
+      this.previous = previous;
+    }
+    final override void setKey(string key)
+    {
+      assert(0, "cannot call setKey on a value");
+    }
+    final override void addValue(Json value)
+    {
+      assert(0, "cannot call addValue on a value");
+    }
+    final override void setCommaContext()
+    {
+      assert(0, "cannot call setCommaContext() on a value");
+    }
+  }
+
+  JsonListNode currentRoot;
+  JsonListNode currentContainer;
   
   bool outsideAllStructures()
   {
@@ -523,7 +713,7 @@ static:
    * slash          = 10, NO
    * hash           = 11, NO
    * quote          = 12, NO
-   * cc             = 13, NO
+   * asciiControl   = 13, NO
    */
   bool nextCouldBePartOfUnquotedString()
   {
@@ -534,11 +724,13 @@ static:
     charSet = jsonCharSetMap[c];
     return charSet == JsonCharSet.other;
   }
-  
+
+
+
   //
   // ExpectedState: c is first letter, next points to char after first letter
   //
-  Json tryScanKeyword()
+  Json tryScanKeywordOrNumber()
   {
     if(c == 'n') {
       if(next + 3 <= limit && next[0..3] == "ull") {
@@ -568,15 +760,39 @@ static:
 	}
       }
     }
-    return Json(cast(Json[])null); // Used to flag that no keyword was found
+
+    next--;
+    char* startNum = next;
+    auto intPartLength = tryScanNumber();
+    if(intPartLength == 0) {
+      next++; // restore next
+      return Json(cast(Json[])null); // Used to flag that no keyword or number was found
+    }
+
+    return Json(startNum[0..next-startNum], intPartLength);
   }
-
-
   // ExpectedState: c is the first char, next points to the next char
   // ReturnState: next points to the char after the string
-  Json scanUnquoted()
+  Json scanNumberOrUnquoted()
   {
-    auto start = next - 1;
+    //
+    // Try to scan a number first
+    //
+    next--;
+    {
+      char* startNum = next;
+      auto intPartLength = tryScanNumber();
+      if(intPartLength > 0) {
+	if(nextCouldBePartOfUnquotedString()) {
+	  next = startNum; // must be an unquoted string
+	} else {
+	  return Json(startNum[0..next-startNum], intPartLength);
+	}
+      }
+    }
+
+    auto start = next;
+    next++;
     while(true) {
       if(next >= limit)
 	break;
@@ -600,6 +816,244 @@ static:
 	return Json(false);
     }
     return Json(cast(string)s);
+  }
+
+
+  // TODO: if the character after the number can be part of an unquoted
+  //       string, then it is an error for strict json, and an unquoted string
+  //       for lenient json.
+  // ExpectedState: c is the first char, next points to c
+  // Returns: length of the integer part of the string
+  //          next points to the character after the number (no change if not a number)
+  size_t tryScanNumber()
+  {
+    size_t intPartLength;
+    char* cpos = next + 1;
+
+    if(c == '-') {
+      if(cpos >= limit)
+       	return 0; // '-' is not a number
+      c = *cpos;
+      cpos++;
+    }
+
+    if(c == '0') {
+      intPartLength = cpos-next;
+      if(cpos < limit) {
+	c = *cpos;
+	if(c == '.')
+	  goto FRAC;
+	if(c == 'e' || c == 'E')
+	  goto EXPONENT;
+      }
+      next += intPartLength;
+      return intPartLength;
+    }
+
+    if(c > '9' || c < '1')
+      return 0; // can't be a number
+
+    while(true) {
+      if(cpos < limit) {
+	c = *cpos;
+	if(c <= '9' && c >= '0') {
+	  cpos++;
+	  continue;
+	}
+	if(c == '.') {
+	  intPartLength = cpos-next;
+	  goto FRAC;
+	}
+	if(c == 'e' || c == 'E') {
+	  intPartLength = cpos-next;
+	  goto EXPONENT;
+	}
+      }
+      intPartLength = cpos-next;
+      next += intPartLength;
+      return intPartLength;
+    }
+
+  FRAC:
+    // cpos points to '.'
+    cpos++;
+    if(cpos >= limit)
+      return 0; // Must have digits after decimal point but got end of input
+    c = *cpos;
+    if(c > '9' || c < '0')
+      return 0; // Must have digits after decimal point but got something else
+    //number.decimalOffset = cpos-next;
+    while(true) {
+      cpos++;
+      if(cpos < limit) {
+	c = *cpos;
+	if(c <= '9' && c >= '0')
+	  continue;
+	if(c == 'e' || c == 'E')
+	  goto EXPONENT;
+      }
+      next = cpos;
+      return intPartLength;
+    }
+
+  EXPONENT:
+    // cpos points to 'e' or 'E'
+    cpos++;
+    if(cpos >= limit)
+      return 0; // Must have -/+/digits after 'e' but got end of input
+    //number.exponentOffset = cpos-next;
+    c = *cpos;
+    if(c == '-') {
+      //number.exponentNegative = true;
+      cpos++;
+      if(cpos >= limit)
+	return 0; // Must have digits after '-'
+      c = *cpos;
+    } else if(c == '+') {
+      cpos++;
+      if(cpos >= limit)
+	return 0; // Must have digits after '+'
+      c = *cpos;
+    }
+
+    if(c > '9' || c < '0')
+      return 0; // Must have digits after 'e'
+    while(true) {
+      cpos++;
+      if(cpos < limit) {
+	c = *cpos;
+	if(c <= '9' && c >= '0')
+	  continue;
+      }
+      next = cpos;
+      return intPartLength;
+    }
+  }
+  unittest
+  {
+    bool printTestInfo;
+    version(PrintTestInfo) {
+      printTestInfo = true;
+    }
+    void test(Json expected, const(char)[] numString)
+    {
+      if(printTestInfo) {
+	writeln("------------------------------------------------------------");
+	writefln("[TEST] %s", numString);
+      }
+      JsonParser.c     = numString[0];
+      JsonParser.next  = cast(char*)numString.ptr;
+      JsonParser.limit = cast(char*)numString.ptr + numString.length;
+      auto parsedIntLength = JsonParser.tryScanNumber();
+      assert(JsonParser.next == JsonParser.limit);
+      auto parsed = Json(numString, parsedIntLength);
+      if(!expected.equals(parsed)) {
+	writefln("Expected: %s", expected);
+	writefln("Actual  : %s", parsed);
+	assert(0);
+      }
+    }
+
+    test(Json( 0  ), "0");
+    test(Json( 0  ), "-0");
+    test(Json( 0.0), "0.0");
+
+    test(Json( 1  ), "1");
+    test(Json(-1  ), "-1");
+    test(Json( 1.0), "1.0");
+
+    test(Json( 9  ), "9");
+    test(Json(-9  ), "-9");
+    test(Json( 9.0), "9.0");
+
+    test(Json( 18446744073709551615UL), "18446744073709551615");
+    test(Json( 18446744073709551614UL), "18446744073709551614");
+
+    test(Json( 9223372036854775807L) , "9223372036854775807");
+
+    test(Json(long.min)               , "-9223372036854775808");
+    test(Json(-9223372036854775807)   , "-9223372036854775807");
+  
+    test(Json( BigInt("123456789012345678901234567890"))            , "123456789012345678901234567890");
+    test(Json( BigInt("999999999999999999999999223372036854775807")), "999999999999999999999999223372036854775807");
+
+    test(Json(1.23456), "1.23456");
+
+    test(Json( 0.0),  "0e0");
+    test(Json(10.0),  "1e1");
+    test(Json(123.4),  "1.234e2");
+
+    test(Json.hugeNumber("1e993882"), "1e993882");
+    test(Json.hugeNumber("0.1e7474993882"), "0.1e7474993882");
+    // TODO: Converting a string to a json number does not handle
+    //       double overflows like this test
+    //test(Json.hugeNumber("0.1234567890123456789"), "0.1234567890123456789");
+  }
+  unittest
+  {
+    char[64] buffer;
+    bool printTestInfo;
+    version(PrintTestInfo) {
+      printTestInfo = true;
+    }
+
+    void testNumber(string intString, string decimalString, string exponentString)
+    {
+      size_t offset = 0;
+      buffer[offset..offset+intString.length] = intString[];
+      offset += intString.length;
+      if(decimalString.length > 0) {
+	buffer[offset++] = '.';
+	buffer[offset..offset+decimalString.length] = decimalString[];
+	offset += decimalString.length;
+      }
+
+      if(exponentString is null) {
+
+	if(printTestInfo)
+	  writefln("[TEST] %s", buffer[0..offset]);
+
+	JsonParser.c     = buffer[0];
+	JsonParser.next  = cast(char*)buffer.ptr;
+	JsonParser.limit = cast(char*)buffer.ptr + offset;
+
+	auto parsedIntLength = JsonParser.tryScanNumber();
+	assert(JsonParser.next == JsonParser.limit);
+	assert(parsedIntLength == intString.length);
+
+      } else {
+
+	auto saveOffset = offset;
+	foreach(exponentChar; ['e', 'E']) {
+	  foreach(exponentSign; ["", "-", "+"]) {
+	    offset = saveOffset;
+	    buffer[offset++] = exponentChar;
+	    buffer[offset..offset+exponentSign.length] = exponentSign[];
+	    offset += exponentSign.length;
+	    buffer[offset..offset+exponentString.length] = exponentString[];
+	    offset += exponentString.length;
+	
+	    if(printTestInfo)
+	      writefln("[TEST] %s", buffer[0..offset]);
+
+	    JsonParser.c     = buffer[0];
+	    JsonParser.next  = cast(char*)buffer.ptr;
+	    JsonParser.limit = cast(char*)buffer.ptr + offset;
+
+	    auto parsedIntLength = JsonParser.tryScanNumber();
+	    assert(parsedIntLength == intString.length);
+	    assert(JsonParser.next == JsonParser.limit);
+	  }
+	}
+      }
+    }
+    foreach(intString; ["0", "1", "1234567890", "9000018283", "-1", "-1234567890", "-28392893823983"]) {
+      foreach(fracString; ["", "0", "1", "9", "00100"]) {
+	foreach(expString; [null, "0", "1", "90009"]) {
+	  testNumber(intString, fracString, expString);
+	}
+      }
+    }
   }
   
   /*
@@ -700,18 +1154,6 @@ Escape Characters
       }
     }
   }
-
-
-/+
-number = [ '-' ] int [ frac ] [ exp ]
-
-digit1-9 = '1' - '9'
-digit    = '0' - '9'
-int = '0' | digit1-9 digit*
-
-frac = '.' DIGIT+
-exp  = 'e' ( '-' | '+' )? DIGIT+
-+/
   
   void setRootContext()
   {
@@ -730,7 +1172,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &quoteRootContext,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "root";
     currentContextMap = contextMap;
@@ -743,16 +1185,16 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.notAscii       : &notImplemented,
        JsonCharSet.spaceTabCR     : &ignore,
        JsonCharSet.newline        : &newline,
-       JsonCharSet.startObject    : &notImplemented,
-       JsonCharSet.endObject      : &endObject,
-       JsonCharSet.startArray     : &notImplemented,
+       JsonCharSet.startObject    : &unexpectedChar,
+       JsonCharSet.endObject      : &endContainer,
+       JsonCharSet.startArray     : &unexpectedChar,
        JsonCharSet.endArray       : &unexpectedChar,
-       JsonCharSet.nameSeparator  : &notImplemented,
-       JsonCharSet.valueSeparator : &notImplemented,
+       JsonCharSet.nameSeparator  : &unexpectedChar,
+       JsonCharSet.valueSeparator : &unexpectedChar,
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &quoteObjectKeyContext,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "object_key";
     currentContextMap = contextMap;
@@ -774,7 +1216,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &quoteObjectValueContext,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "object_value";
     currentContextMap = contextMap;
@@ -790,13 +1232,13 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.startObject    : &startObject,
        JsonCharSet.endObject      : &unexpectedChar,
        JsonCharSet.startArray     : &startArray,
-       JsonCharSet.endArray       : &endArray,
+       JsonCharSet.endArray       : &endContainer,
        JsonCharSet.nameSeparator  : &unexpectedChar,
        JsonCharSet.valueSeparator : &unexpectedChar,
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &quoteArrayContext,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "array";
     currentContextMap = contextMap;
@@ -812,13 +1254,13 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.startObject    : &unexpectedChar,
        JsonCharSet.endObject      : &unexpectedChar,
        JsonCharSet.startArray     : &unexpectedChar,
-       JsonCharSet.endArray       : &endArray,
+       JsonCharSet.endArray       : &endContainer,
        JsonCharSet.nameSeparator  : &objectColon,
        JsonCharSet.valueSeparator : &unexpectedChar,
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &unexpectedChar,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "object_colon";
     currentContextMap = contextMap;
@@ -832,7 +1274,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.spaceTabCR     : &ignore,
        JsonCharSet.newline        : &newline,
        JsonCharSet.startObject    : &unexpectedChar,
-       JsonCharSet.endObject      : &endObject,
+       JsonCharSet.endObject      : &endContainer,
        JsonCharSet.startArray     : &unexpectedChar,
        JsonCharSet.endArray       : &unexpectedChar,
        JsonCharSet.nameSeparator  : &unexpectedChar,
@@ -840,7 +1282,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &unexpectedChar,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "object_comma";
     currentContextMap = contextMap;
@@ -856,13 +1298,13 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
        JsonCharSet.startObject    : &unexpectedChar,
        JsonCharSet.endObject      : &unexpectedChar,
        JsonCharSet.startArray     : &unexpectedChar,
-       JsonCharSet.endArray       : &endArray,
+       JsonCharSet.endArray       : &endContainer,
        JsonCharSet.nameSeparator  : &unexpectedChar,
        JsonCharSet.valueSeparator : &arrayCommaSeparator,
        JsonCharSet.slash          : &notImplemented,
        JsonCharSet.hash           : &notImplemented,
        JsonCharSet.quote          : &unexpectedChar,
-       JsonCharSet.cc             : &invalidControlChar
+       JsonCharSet.asciiControl   : &invalidControlChar
        ];
     currentContextDebugName = "array_comma";
     currentContextMap = contextMap;
@@ -881,62 +1323,37 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
   }
   void startRootObject()
   {
-    currentRoot = new JsonListNode(currentRoot);
+    currentRoot = new JsonObjectNode(currentRoot);
     currentContainer = currentRoot;
-    currentRoot.json.setupAsObject();
     setObjectKeyContext();
   }
   void startRootArray()
   {
-    currentRoot = new JsonListNode(currentRoot);
+    currentRoot = new JsonArrayNode(currentRoot);
     currentContainer = currentRoot;
-    currentRoot.json.setupAsArray();
     setArrayValueContext();
   }
   void startObject()
   {
-    currentContainer = new JsonListNode(currentContainer);
-    currentContainer.json.setupAsObject();
+    currentContainer = new JsonObjectNode(currentContainer);
     setObjectKeyContext();
   }
   void startArray()
   {
-    currentContainer = new JsonListNode(currentContainer);
-    currentContainer.json.setupAsArray();
+    currentContainer = new JsonArrayNode(currentContainer);
     setArrayValueContext();
   }
-  void endObject()
+  void endContainer()
   {
-    if(currentContainer is null) {
-      throw new Exception("code bug? got endObject when currentContainer was null");
-      //throw new JsonException(JsonException.Type.unexpectedCloseBrace, "found '}' outside any object");
-    } else if(currentContainer is currentRoot) {
+    assert(currentContainer !is null, "code bug? endContainer was called when currentContainer was null");
+
+    if(currentContainer is currentRoot) {
       currentContainer = null;
       setRootContext();
     } else {
+      currentContainer.previous.addValue(currentContainer.json);
       currentContainer = currentContainer.previous;
-      if(currentContainer.json.isObject()) {
-	setObjectCommaContext();
-      } else {
-	setArrayCommaContext();
-      }
-    }
-  }
-  void endArray()
-  {
-    if(currentContainer is null) {
-      throw new Exception("code bug? got endArray when currentContainer was null");
-      //throw new JsonException(JsonException.Type.unexpectedCloseBracket, "found ']' outside any object");
-    } else if(currentContainer is currentRoot) {
-      currentContainer = null;
-      setRootContext();
-    } else {
-      currentContainer = currentContainer.previous;
-      if(currentContainer.json.isObject()) {
-	setObjectCommaContext();
-      } else {
-	setArrayCommaContext();
-      }
+      currentContainer.setCommaContext();
     }
   }
   void objectColon()
@@ -959,46 +1376,45 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
   {
     Json value;
     if(options.lenient) {
-      value = scanUnquoted();
+      value = scanNumberOrUnquoted();
     } else {
-      value = tryScanKeyword();
+      value = tryScanKeywordOrNumber();
       if(value.isArray())
 	throw new JsonException(JsonException.Type.unexpectedChar, format("unexpected char '%s'", c));
     }
-    currentRoot = new JsonListNode(currentRoot);
-    currentRoot.json = value;
+    currentRoot = new JsonValueNode(value, currentRoot);
   }
   void otherObjectKeyContext()
   {
     if(!options.lenient)
       throw new JsonException(JsonException.Type.unexpectedChar, format("unexpected char '%s'", c));
 
-    Json value = scanUnquoted();
+    Json value = scanNumberOrUnquoted();
     if(!value.isString())
       throw new JsonException(JsonException.Type.keywordAsKey, format("expected string but got keyword '%s'", value));
-    currentKey = value.payload.string_;
+    currentContainer.setKey(value.payload.string_);
     setObjectColonContext();
   }
   void otherObjectValueContext()
   {
     Json value;
     if(options.lenient) {
-      value = scanUnquoted();
+      value = scanNumberOrUnquoted();
     } else {
-      value = tryScanKeyword();
+      value = tryScanKeywordOrNumber();
       if(value.isArray())
 	throw new JsonException(JsonException.Type.unexpectedChar, format("unexpected char '%s'", c));
     }
-    currentContainer.json.add(currentKey, value);
+    currentContainer.addValue(value);
     setObjectCommaContext();
   }
   void otherArrayContext()
   {
     Json value;
     if(options.lenient) {
-      value = scanUnquoted();
+      value = scanNumberOrUnquoted();
     } else {
-      value = tryScanKeyword();
+      value = tryScanKeywordOrNumber();
       if(value.isArray())
 	throw new JsonException(JsonException.Type.unexpectedChar, format("unexpected char '%s'", c));
     }
@@ -1010,8 +1426,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
     char* startOfString = next;
     bool endedWithQuote = scanQuotedString();
     if(endedWithQuote) {
-      currentRoot = new JsonListNode(currentRoot);
-      currentRoot.json = Json(cast(string)(startOfString[0..next-startOfString - 1]));
+      currentRoot = new JsonValueNode(Json(cast(string)(startOfString[0..next-startOfString - 1])), currentRoot);
     } else {
       throw new Exception("end of input inside quoted string, no implementation for this yet");
     }
@@ -1021,7 +1436,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
     char* startOfString = next;
     bool endedWithQuote = scanQuotedString();
     if(endedWithQuote) {
-      currentKey = cast(string)(startOfString[0..next-startOfString - 1]);
+      currentContainer.setKey(cast(string)(startOfString[0..next-startOfString - 1]));
     } else {
       throw new Exception("end of input inside quoted string, no implementation for this yet");
     }
@@ -1032,7 +1447,7 @@ exp  = 'e' ( '-' | '+' )? DIGIT+
     char* startOfString = next;
     bool endedWithQuote = scanQuotedString();
     if(endedWithQuote) {
-      currentContainer.json.add(currentKey, Json(cast(string)(startOfString[0..next-startOfString - 1])));
+      currentContainer.addValue(Json(cast(string)(startOfString[0..next-startOfString - 1])));
     } else {
       throw new Exception("end of input inside quoted string, no implementation for this yet");
     }
@@ -1099,18 +1514,23 @@ Json parseJson(char* start, const char* limit, JsonOptions options = JsonOptions
 
   return JsonParser.currentRoot.json;
 }
-
 unittest
 {
+  bool printTestInfo;
+  version(PrintTestInfo) {
+    printTestInfo = true;
+  }
   JsonOptions options;
   void setLenient()
   {
-    writeln("[DEBUG] Lenient JSON: true");
+    if(printTestInfo)
+      writeln("[DEBUG] LenientJson: ON");
     options.lenient = true;
   }
   void unsetLenient()
   {
-    writeln("[DEBUG] Lenient JSON: false");
+    if(printTestInfo)
+      writeln("[DEBUG] LenientJson: OFF");
     options.lenient = false;
   }
 
@@ -1118,8 +1538,10 @@ unittest
   
   void testError(JsonException.Type expectedError, const(char)[] s, size_t testLine = __LINE__)
   {
-    writeln("--------------------------------------------------------------");
-    writefln("[TEST] %s", escape(s));
+    if(printTestInfo) {
+      writeln("--------------------------------------------------------------");
+      writefln("[TEST] %s", escape(s));
+    }
     try {
       auto json = parseJson(cast(char*)s.ptr, s.ptr + s.length, options);
       assert(0, format("Expected exception '%s' but did not get one. (testline %s) JSON='%s'",
@@ -1127,7 +1549,9 @@ unittest
     } catch(JsonException e) {
       assert(expectedError == e.type, format("Expected error '%s' but got '%s' (testline %s)",
 					     expectedError, e.type, testLine));
-      writefln("[TEST-DEBUG] got expected error '%s' from '%s'", e.type, escape(s));
+      if(printTestInfo) {
+	writefln("[TEST-DEBUG] got expected error '%s' from '%s'", e.type, escape(s));
+      }
     }
   }
 
@@ -1135,29 +1559,33 @@ unittest
   testError(JsonException.Type.noJson, " \t\r\n");
 
   for(char c = 0; c < ' '; c++) {
-    if(jsonCharSetMap[c] == JsonCharSet.cc) {
+    if(jsonCharSetMap[c] == JsonCharSet.asciiControl) {
       buffer[0] = cast(char)c;
       testError(JsonException.Type.controlChar, buffer[0..1]);
     }
   }
 
-  testError(JsonException.Type.endedInsideStructure, "{");
-  testError(JsonException.Type.endedInsideStructure, "[");
+  foreach(i; 0..2) {
+    testError(JsonException.Type.endedInsideStructure, "{");
+    testError(JsonException.Type.endedInsideStructure, "[");
 
-  testError(JsonException.Type.unexpectedChar, "}");
-  testError(JsonException.Type.unexpectedChar, "]");
-  testError(JsonException.Type.unexpectedChar, ":");
-  testError(JsonException.Type.unexpectedChar, ",");
-  testError(JsonException.Type.unexpectedChar, "{]");
-  testError(JsonException.Type.unexpectedChar, "[}");
+    testError(JsonException.Type.unexpectedChar, "}");
+    testError(JsonException.Type.unexpectedChar, "]");
+    testError(JsonException.Type.unexpectedChar, ":");
+    testError(JsonException.Type.unexpectedChar, ",");
+    testError(JsonException.Type.unexpectedChar, "{]");
+    testError(JsonException.Type.unexpectedChar, "[}");
 
-  testError(JsonException.Type.tabNewlineCRInsideQuotes, "\"\t");
-  testError(JsonException.Type.tabNewlineCRInsideQuotes, "\"\n");
-  testError(JsonException.Type.tabNewlineCRInsideQuotes, "\"\r");
+    testError(JsonException.Type.tabNewlineCRInsideQuotes, "\"\t");
+    testError(JsonException.Type.tabNewlineCRInsideQuotes, "\"\n");
+    testError(JsonException.Type.tabNewlineCRInsideQuotes, "\"\r");
 
-  testError(JsonException.Type.multipleRoots, "null null");
-  testError(JsonException.Type.multipleRoots, "true false");
-  testError(JsonException.Type.multipleRoots, `"hey" null`);
+    testError(JsonException.Type.multipleRoots, "null null");
+    testError(JsonException.Type.multipleRoots, "true false");
+    testError(JsonException.Type.multipleRoots, `"hey" null`);
+    setLenient();
+  }
+  unsetLenient();
 
   setLenient();
   testError(JsonException.Type.keywordAsKey, `{null`);
@@ -1167,8 +1595,10 @@ unittest
 
   void test(const(char)[] s, Json expectedValue)
   {
-    writeln("--------------------------------------------------------------");
-    writefln("[TEST] %s", escape(s));
+    if(printTestInfo) {
+      writeln("--------------------------------------------------------------");
+      writefln("[TEST] %s", escape(s));
+    }
     auto json = parseJson(cast(char*)s.ptr, s.ptr + s.length, options);
     if(!expectedValue.equals(json)) {
       writefln("Expected: %s", expectedValue);
@@ -1178,25 +1608,106 @@ unittest
     }
   }
 
-  // Keywords
-  test(`null`, Json.null_);
-  test(`true`, Json(true));
-  test(`false`, Json(false));
+  foreach(i; 0..2) {
+    // Keywords
+    test(`null`, Json.null_);
+    test(`true`, Json(true));
+    test(`false`, Json(false));
+  
+    // Numbers
+    test(`0`, Json(0));
+    test(`-0`, Json(0));
+    test(`1`, Json(1));
+    test(`-1`, Json(-1));
+    test(`0.1234`, Json(0.1234));
+    test(`123.4E-3`, Json(0.1234));
+    test(`123.4E-3`, Json(0.1234));
+    test(`1234567890123456789012345678901234567890`, Json(BigInt("1234567890123456789012345678901234567890")));
+    test(`123.4E-9999999999999999999`, Json.hugeNumber(`123.4E-9999999999999999999`));
 
-  // Strings that are Keywords
-  test(`"null"`, Json("null"));
-  test(`"true"`, Json("true"));
-  test(`"false"`, Json("false"));
+    // Strings that are Keywords
+    test(`"null"`, Json("null"));
+    test(`"true"`, Json("true"));
+    test(`"false"`, Json("false"));
 
-  // Strings
-  test(`""`, Json(""));
-  test(`"a"`, Json("a"));
-  test(`"ab"`, Json("ab"));
-  test(`"hello, world"`, Json("hello, world"));
+    // Strings
+    test(`""`, Json(""));
+    test(`"a"`, Json("a"));
+    test(`"ab"`, Json("ab"));
+    test(`"hello, world"`, Json("hello, world"));
+
+    // Arrays
+    test(`[]`, Json(cast(Json[])[]));
+    test(`[null]`, Json([Json.null_]));
+    test(`[true]`, Json([Json(true)]));
+    test(`[false]`, Json([Json(false)]));
+    test(`[""]`, Json([Json("")]));
+    test(`["a"]`, Json([Json("a")]));
+    test(`["ab"]`, Json([Json("ab")]));
+
+    test(`[null,null]`, Json([Json.null_, Json.null_]));
+    test(`[false,true,null,false]`, Json([Json(false), Json(true), Json.null_, Json(false)]));
+
+    test(`["null","false","true"]`, Json([Json("null"),Json("false"),Json("true")]));
+
+    test(`["a","b"]`, Json([Json("a"),Json("b")]));
+    test(`["abc",false,"hello"]`, Json([Json("abc"),Json(false),Json("hello")]));
+
+    // Objects
+    Json[string] emptyMap;
+    test(`{}`, Json(emptyMap));
+
+    test(`{"name":null}`, Json(["name":Json.null_]));
+    test(`{"name":true}`, Json(["name":Json(true)]));
+    test(`{"name":false}`, Json(["name":Json(false)]));
+
+    test(`{"v":"null"}`, Json(["v":Json("null")]));
+    test(`{"v":"true"}`, Json(["v":Json("true")]));
+    test(`{"v":"false"}`, Json(["v":Json("false")]));
+    test(`{"null":null}`, Json(["null":Json.null_]));
+    test(`{"true":false}`, Json(["true":Json(false)]));
+    test(`{"false":"hello"}`, Json(["false":Json("hello")]));
+
+    // Nested structures
+    test(`[
+    [1,2,3,4],
+    ["a", "b", [1,2,3]]
+]`, Json([
+	  Json([Json(1),Json(2),Json(3),Json(4)]),
+	  Json([Json("a"),Json("b"),Json([Json(1),Json(2),Json(3)])])
+	  ]));
+
+    test(`
+{
+    "key":182993,
+    "key2":"value2",
+    "key3":null,
+    "key4":["hello","is","this","working"],
+    "key5":{"another":false}
+}`, Json([
+	  "key" : Json(182993),
+	  "key2" : Json("value2"),
+	  "key3" : Json.null_,
+	  "key4" : Json([Json("hello"),Json("is"),Json("this"),Json("working")]),
+	  "key5" : Json(["another":Json(false)])
+	  ]));
+
+    setLenient();
+  }
+  unsetLenient();
+  
+  setLenient();
+  test(`[a]`, Json([Json("a")]));
+  test(`[abc,null_]`, Json([Json("abc"),Json("null_")]));
+
+  unsetLenient();
+  testError(JsonException.Type.unexpectedChar, `[a]`);
+  testError(JsonException.Type.unexpectedChar, `[abc,null_]`);
 
   // Unquoted Strings
   {
-    auto testStrings = ["a", "ab", "hello", "null_", "true_", "false_"];
+    auto testStrings = ["a", "ab", "hello", "null_", "true_", "false_",
+			"1e", "1.0a", "1a", "4893.0e9_"];
     setLenient();
     foreach(testString; testStrings) {
       test(testString, Json(testString));
@@ -1206,53 +1717,11 @@ unittest
       testError(JsonException.Type.unexpectedChar, testString);
     }
   }
-
-  // Arrays
-  test(`[]`, Json(cast(Json[])[]));
-  test(`[null]`, Json([Json.null_]));
-  test(`[true]`, Json([Json(true)]));
-  test(`[false]`, Json([Json(false)]));
-  test(`[""]`, Json([Json("")]));
-  test(`["a"]`, Json([Json("a")]));
-  test(`["ab"]`, Json([Json("ab")]));
-
-  test(`[null,null]`, Json([Json.null_, Json.null_]));
-  test(`[false,true,null,false]`, Json([Json(false), Json(true), Json.null_, Json(false)]));
-
-  test(`["null","false","true"]`, Json([Json("null"),Json("false"),Json("true")]));
-
-  test(`["a","b"]`, Json([Json("a"),Json("b")]));
-  test(`["abc",false,"hello"]`, Json([Json("abc"),Json(false),Json("hello")]));
-
-  setLenient();
-  test(`[a]`, Json([Json("a")]));
-  test(`[abc,null_]`, Json([Json("abc"),Json("null_")]));
-
-  unsetLenient();
-  testError(JsonException.Type.unexpectedChar, `[a]`);
-  testError(JsonException.Type.unexpectedChar, `[abc,null_]`);
-
-  // Objects
-  Json[string] emptyMap;
-  test(`{}`, Json(emptyMap));
-
-  test(`{"name":null}`, Json(["name":Json.null_]));
-  test(`{"name":true}`, Json(["name":Json(true)]));
-  test(`{"name":false}`, Json(["name":Json(false)]));
-
-  test(`{"v":"null"}`, Json(["v":Json("null")]));
-  test(`{"v":"true"}`, Json(["v":Json("true")]));
-  test(`{"v":"false"}`, Json(["v":Json("false")]));
-  test(`{"null":null}`, Json(["null":Json.null_]));
-  test(`{"true":false}`, Json(["true":Json(false)]));
-  test(`{"false":"hello"}`, Json(["false":Json("hello")]));
-
 }
 
 
 
-
-
+version(unittest) {
 immutable string[] escapeTable =
   [
    "\\0"  ,
@@ -1419,4 +1888,5 @@ inout(char)[] escape(inout(char)[] str) pure {
   }
 
   return cast(inout(char)[])newString;
+}
 }
