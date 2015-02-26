@@ -3,6 +3,7 @@ import std.datetime;
 import std.range;
 
 import json;
+import json2;
 import std.json;
 
 // GitRepo: https://github.com/s-ludwig/std_data_json.git
@@ -18,8 +19,11 @@ void showError()
 
 void main(string[] args)
 {
-  //runTest(3, 100_000, `["hello","is","this","working", 1, 2.485e4]`);
-  runTest(3, 10_000, `{"key":182993,"key2":"value2","key3":null,"key4":["hello","is","this","working"],"key5":{"another":false}}`);
+  //runTest(3, 100_000, `"hello"`);
+  //runTest(3, 100_000, `"100283.00e13"`);
+  //runTest(3, 100_000, `"[100283.00e13]"`);
+  runTest(3, 100_000, `["hello","is","this","working", 1, 2.485e4]`);
+  //runTest(3, 10_000, `{"key":182993,"key2":"value2","key3":null,"key4":["hello","is","this","working"],"key5":{"another":false}}`);
 }
 
 void runTest(size_t runCount, size_t loopCount, string testString)
@@ -52,10 +56,18 @@ void runTest(size_t runCount, size_t loopCount, string testString)
     sw.reset();
     sw.start();
     for(auto i = 0; i < loopCount; i++) {
-      parseJson(testString);
+      json.parseJson(testString);
     }
     sw.stop();
     writefln("  more.json     : %s milliseconds", sw.peek.msecs);
+
+    sw.reset();
+    sw.start();
+    for(auto i = 0; i < loopCount; i++) {
+      json2.parseJson(cast(char[])testString);
+    }
+    sw.stop();
+    writefln("  more.json2    : %s milliseconds", sw.peek.msecs);
   }
 }
 

@@ -2,11 +2,7 @@
 set -e
 
 # Build Json Parser from S-Ludwig
-# Use dub in ../std_data_json
 
-#export EXTRA_VERSION=
-export EXTRA_VERSION=-version=OneParseJsonAtATime
-
-dmd -O -release -inline -boundscheck=off ${EXTRA_VERSION} -I../std_data_json/source performance.d json.d ../std_data_json/source/stdx/data/json/*.d
+dmd -O -release -inline -boundscheck=off  -I../std_data_json/source performance.d json.d json2.d ../std_data_json/source/stdx/data/json/*.d
 
 ./performance

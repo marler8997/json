@@ -674,6 +674,21 @@ struct JsonExceptionMessage
     return format;
   }
 }
+
+//
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// TRY MAKING OneParseJsonAtATime version use static variables
+// and make the other version use instance variables
+// This means removing state.<var> from every state variable
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 struct JsonParserState
 {
   JsonOptions options;
@@ -780,7 +795,6 @@ private
   void invalidSetCommaContext() {
     assert(0, "code bug: cannot call setCommmaContext on a non-object/array value");;
   }
-
   enum JsonCharSet : ubyte {
     other          =  0, // (default) Any ascii character that is not in another set 
     notAscii       =  1, // Any character larger then 127 (> 0x7F)
@@ -1927,7 +1941,6 @@ Json[] parseJsonValues(OnlyUtf8 onlyUtf8 = OnlyUtf8.yes)(char* start, const char
 
   state.options = options;
   //if(state.options.allocator
-
   
   state.next = start;
   state.limit = cast(char*)limit;
@@ -1939,7 +1952,9 @@ Json[] parseJsonValues(OnlyUtf8 onlyUtf8 = OnlyUtf8.yes)(char* start, const char
   state.throwing = false;
   
   JsonParser!onlyUtf8.setRootContext();
+
   JsonParser!onlyUtf8.parseStateMachine();
+
   if(state.throwing) {
     // throw the exception
     throw new JsonException(state.exceptionType, state.exceptionMessage.create());
