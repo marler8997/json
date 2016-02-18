@@ -2,12 +2,15 @@ import std.stdio;
 import std.datetime;
 import std.range;
 
+//import json_firsttry;
 import json;
-import json2;
 import std.json;
 
-// GitRepo: https://github.com/s-ludwig/std_data_json.git
-import stdx.data.json.parser;
+version(StdxJson)
+{
+  // GitRepo: https://github.com/s-ludwig/std_data_json.git
+  import stdx.data.json.parser;
+}
 
 void showError()
 {
@@ -42,32 +45,37 @@ void runTest(size_t runCount, size_t loopCount, string testString)
       std.json.parseJSON(testString);
     }
     sw.stop();
-    writefln("  std.json      : %s milliseconds", sw.peek.msecs);
+    writefln("  std.json          : %s milliseconds", sw.peek.msecs);
 
+    version(StdxJson)
+    {
+      sw.reset();
+      sw.start();
+      for(auto i = 0; i < loopCount; i++) {
+        string parsed = testString;
+        stdx.data.json.parser.parseJSONValue(parsed);
+      }
+      sw.stop();
+      writefln("  stdx.data.json    : %s milliseconds", sw.peek.msecs);
+    }
+
+    /*
     sw.reset();
     sw.start();
     for(auto i = 0; i < loopCount; i++) {
-      string parsed = testString;
-      stdx.data.json.parser.parseJSONValue(parsed);
+      json_firsttry.parseJson(testString);
     }
     sw.stop();
-    writefln("  stdx.data.json: %s milliseconds", sw.peek.msecs);
-
+    writefln("  more.json_firsttry: %s milliseconds", sw.peek.msecs);
+    */
+    
     sw.reset();
     sw.start();
     for(auto i = 0; i < loopCount; i++) {
-      json.parseJson(testString);
+      json.parseJson(cast(char[])testString);
     }
     sw.stop();
-    writefln("  more.json     : %s milliseconds", sw.peek.msecs);
-
-    sw.reset();
-    sw.start();
-    for(auto i = 0; i < loopCount; i++) {
-      json2.parseJson(cast(char[])testString);
-    }
-    sw.stop();
-    writefln("  more.json2    : %s milliseconds", sw.peek.msecs);
+    writefln("  more.json         : %s milliseconds", sw.peek.msecs);
   }
 }
 

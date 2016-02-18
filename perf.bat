@@ -4,13 +4,13 @@ set STDX=..\std_data_json\source\stdx\data\json
 
 
 REM @echo on
-REM dmd -ofperfOneAtATime   -O -release -inline -boundscheck=off -I..\std_data_json\source performance.d json.d json2.d %STDX%\foundation.d %STDX%\lexer.d %STDX%\parser.d %STDX%\value.d -version=OneParseJsonAtATime
+REM dmd -ofperfOneAtATime   -O -release -inline -boundscheck=off -I..\std_data_json\source performance.d json_firsttry.d json.d %STDX%\foundation.d %STDX%\lexer.d %STDX%\parser.d %STDX%\value.d -version=OneParseJsonAtATime
 
 REM @echo off
 REM if ERRORLEVEL 1 goto EXIT
 
 @echo on
-dmd -ofperformance -O -release -inline -boundscheck=off -I..\std_data_json\source performance.d json.d json2.d %STDX%\foundation.d %STDX%\lexer.d %STDX%\parser.d %STDX%\value.d
+dmd -ofperformance -O -release -inline -boundscheck=off -I..\std_data_json\source performance.d json_firsttry.d json.d %STDX%\foundation.d %STDX%\lexer.d %STDX%\parser.d %STDX%\value.d
 
 @echo off
 if ERRORLEVEL 1 goto EXIT
